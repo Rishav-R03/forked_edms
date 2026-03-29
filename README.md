@@ -8,9 +8,9 @@ During development stages `endpoints` may not change, but the associated QS pair
 * Multiple servers talking to each other through QS pairs per E
 * Simple change in either of `E, Q or S` can lead to a systemic mess
 * Team members involved in managing microservices experience coordination delays
-         - endpoints not versioned
-         - endpoints not mapped against QS pairs
-         - no summary of endpoint inventory
+  - endpoints not versioned
+  - endpoints not mapped against QS pairs
+  - no summary of endpoint inventory
 
 So, EDMS helps to reduce the chaos so that development progresses without hassle regardless of the team size, without having to compromise speed or efficiency.  
 
