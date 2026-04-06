@@ -1,3 +1,5 @@
+// zipops.rs
+
 #![allow(dead_code)]
 use std::collections::HashSet;
 use std::fs::{self, File};
@@ -12,6 +14,7 @@ use walkdir::WalkDir;
 use zip::{ZipArchive, ZipWriter};
 use zip::write::SimpleFileOptions;
 
+// Use a consistent error type throughout
 type DynResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -96,7 +99,6 @@ pub fn create_zip_from_bookmarks(
 // ─────────────────────────────────────────────────────────────────────────────
 //
 
-
 pub fn import_zip_impl(
     zip_file: &Path,
     destination_folder: &Path,
@@ -160,16 +162,34 @@ pub fn mark_active_folder(
     let source      = session_backup.join(folder_name);
     let destination = active_folder.join(folder_name);
 
+    // 1. Ensure source exists so the move doesn't fail
     if !source.exists() {
-        return Err(format!("Source folder missing: {}", source.display()).into());
+        tracing::info!("Creating missing source directory: {:?}", source);
+        fs::create_dir_all(&source)?;
     }
 
+    // 2. Clear out the destination if it already exists
     if destination.exists() {
         fs::remove_dir_all(&destination)?;
     }
 
-    fs::rename(&source, &destination)?;
+    // 3. Attempt an atomic rename (fast)
+    if let Err(e) = fs::rename(&source, &destination) {
+        tracing::warn!("Rename failed ({}), falling back to manual copy/delete", e);
+        
+        // Fallback: Copy using your WalkDir method
+        copy_dir_all(&source, &destination)?;
+        
+        // Clean up the source after successful copy
+        fs::remove_dir_all(&source)?;
+    }
 
+    // 4. Ensure the config directory exists before writing
+    if let Some(parent) = yaml_config_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    // 5. Update the YAML configuration
     let yaml_content = format!("active_folder: {}\n", folder_name);
     fs::write(yaml_config_path, yaml_content)?;
 
@@ -308,7 +328,7 @@ pub fn merge_zipfiles(
     filename: &str,
     input_list: &[PathBuf],
     destination_root: &Path,
-) -> Result<PathBuf, Box<dyn std::error::Error>> {
+) -> DynResult<PathBuf> {
     // append both a timestamp AND a UUID to guarantee uniqueness even
     // when the function is called multiple times within the same second.
     let ts   = Utc::now().timestamp_millis();
@@ -360,7 +380,7 @@ pub fn merge_zipfiles(
 pub fn merge_sqlitefiles(
     workspace: &Path,
     input_list: &[PathBuf],
-) -> Result<PathBuf, Box<dyn std::error::Error>> {
+) -> DynResult<PathBuf> {
     let merged_path = workspace.join("merged.sqlite");
     let merge_conn  = Connection::open(&merged_path)?;
 
@@ -395,7 +415,7 @@ pub fn merge_sqlitefiles(
                 validate_identifier(table)
                     .map_err(|_e| rusqlite::Error::InvalidQuery)?;
 
-            //    create the table in the merged DB if it does not
+                //    create the table in the merged DB if it does not
                 // exist yet, copying the schema from the source.
                 merge_conn.execute(
                     &format!(
@@ -416,7 +436,6 @@ pub fn merge_sqlitefiles(
                 )?;
             }
 
-
             merge_conn.execute("DETACH DATABASE src", [])?;
         }
     }
@@ -430,7 +449,7 @@ pub fn merge_sqlitefiles(
 // ─────────────────────────────────────────────────────────────────────────────
 //
 
-fn zip_folder(source_dir: &Path, output_file: &Path) -> DynResult<()> {
+pub fn zip_folder(source_dir: &Path, output_file: &Path) -> DynResult<()> {
     let file = File::create(output_file)?;
     let mut zip = ZipWriter::new(file);
     let options = SimpleFileOptions::default();
@@ -453,7 +472,7 @@ fn zip_folder(source_dir: &Path, output_file: &Path) -> DynResult<()> {
     Ok(())
 }
 
-fn find_sqlite(input: &Path) -> Result<Option<PathBuf>, Box<dyn std::error::Error>> {
+fn find_sqlite(input: &Path) -> DynResult<Option<PathBuf>> {
     // Bare zip files are not walked here — they should be extracted first.
     if input.is_file() {
         return Ok(
@@ -477,35 +496,32 @@ fn find_sqlite(input: &Path) -> Result<Option<PathBuf>, Box<dyn std::error::Erro
     Ok(None)
 }
 
-
-fn copy_dir_all(src: &Path, dst: &Path) -> Result<(), Box<dyn std::error::Error>> {
+fn copy_dir_all(src: &Path, dst: &Path) -> DynResult<()> {
     let mut seen: HashSet<PathBuf> = HashSet::new();
 
     for entry in WalkDir::new(src) {
-        let entry     = entry?;
-        let rel       = entry.path().strip_prefix(src)?;
+        // Explicitly map the error to our DynResult type
+        let entry = entry.map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+        let rel = entry.path().strip_prefix(src)
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+        
         let dest_path = dst.join(rel);
 
         if entry.file_type().is_dir() {
-            fs::create_dir_all(&dest_path)?;
+            fs::create_dir_all(&dest_path).map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
         } else {
             if seen.contains(rel) {
-                warn!(
-                    "Skipping duplicate file during copy: {}",
-                    rel.display()
-                );
+                warn!("Skipping duplicate file during copy: {}", rel.display());
                 continue;
             }
-            fs::copy(entry.path(), &dest_path)?;
+            fs::copy(entry.path(), &dest_path).map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
             seen.insert(rel.to_path_buf());
         }
     }
-
     Ok(())
 }
 
-
-fn extract_zip(zip_path: &Path, dest: &Path) -> Result<(), Box<dyn std::error::Error>> {
+fn extract_zip(zip_path: &Path, dest: &Path) -> DynResult<()> {
     fs::create_dir_all(dest)?;
     let canonical_dest = dest.canonicalize()?;
 
@@ -547,7 +563,7 @@ fn extract_zip(zip_path: &Path, dest: &Path) -> Result<(), Box<dyn std::error::E
 fn create_zip_from_dir(
     src_dir: &Path,
     zip_path: &Path,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> DynResult<()> {
     let file = File::create(zip_path)?;
     let mut zip = ZipWriter::new(file);
 
@@ -574,7 +590,7 @@ fn create_zip_from_dir(
 // Input Validation 
 // ─────────────────────────────────────────────────────────────────────────────
 
-fn validate_abs_path(p: &str, field: &str) -> Result<PathBuf,String>  {
+fn validate_abs_path(p: &str, field: &str) -> Result<PathBuf, String> {
     if p.is_empty() {
         return Err(format!("{} must not be empty", field));
     }

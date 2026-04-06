@@ -190,9 +190,11 @@ pub fn verify_and_init(root_path: &Path) -> Result<SystemInitReport, Box<dyn std
     Ok(report)
 }
 
-/// Resolve the edms_root path the same way system_runner does —
-/// relative to CARGO_MANIFEST_DIR at compile time, i.e. the project root.
 pub fn default_root_path() -> PathBuf {
-    let base = Path::new(env!("CARGO_MANIFEST_DIR"));
-    base.join("edms_root")
+    // This finds the "edms_sys" parent directory regardless of which crate calls it
+    let mut path = std::env::current_dir().unwrap();
+    while !path.join("compute").exists() && path.parent().is_some() {
+        path = path.parent().unwrap().to_path_buf();
+    }
+    path.join("edms_root")
 }
